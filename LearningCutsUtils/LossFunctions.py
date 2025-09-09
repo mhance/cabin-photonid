@@ -46,11 +46,12 @@ class photonlossvars(lossvars):
         return third
         
 
+# This should really go into CABIN at some point.
 def smooth_loss_fn(xaxis,cuts):
-    featureloss = None
+    loss = None
 
     if len(xaxis)<3: 
-        return featureloss
+        return loss
 
     for i in range(1,len(xaxis)-1):
         # y is the cut, x is the dependent variable (e.g. efficiency, or pT, or mu)
@@ -61,15 +62,6 @@ def smooth_loss_fn(xaxis,cuts):
         x_im1 = xaxis[i-1]
         x_ip1 = xaxis[i+1]
 
-        # calculate distance between cuts.  
-        # would be better to implement this as some kind of distance away from the region 
-        # between the two other cuts.
-        #
-        # maybe some kind of dot product?  think about Ising model.
-        #
-        # maybe we just do this for the full set of biases, to see how many transitions there are?  no need for a loop?
-        #
-        # otherwise just implement as a switch that calculates a distance if outside of the range of the two cuts, zero otherwise
         fl = None
 
         # ------------------------------------------------------------------
@@ -87,7 +79,7 @@ def smooth_loss_fn(xaxis,cuts):
         # playing with the exponent doesn't change behavior much.
         # it's important that this term not become too large, otherwise
         # the training won't converge.  just a modest penalty for moving
-        # away from the mean should do the trick.
+        # away from the linear interpolation should do the trick.
         exponent=2.  # if this changes, e.g. to 4, then epsilon will also need to increase
         fl=(distance_from_interp**exponent)/((yrange**exponent)+0.1)
         # ------------------------------------------------------------------
@@ -96,60 +88,87 @@ def smooth_loss_fn(xaxis,cuts):
         ## can also do it this way, which just forces all sequential cuts to be similar.
         #fl = torch.pow(cuts_i-cuts_im1,2) + torch.pow(cuts_i-cuts_ip1,2) + torch.pow(cuts_im1-cuts_ip1,2)
         # ------------------------------------------------------------------
-        if featureloss == None:
-            featureloss = fl
+        if loss == None:
+            loss = fl
         else:
-            featureloss = featureloss + fl
+            loss = loss + fl
 
     # sum over all cuts, and normalize to the number of xaxis points
-    return torch.sum(featureloss)/len(xaxis)
+    return torch.sum(loss)/len(xaxis)
+
+    
+# this also needs to go into CABIN
+def effic_loss_fn_updated(
+    y_pred,
+    y_true,
+    features,
+    net,
+    alpha=1.0,
+    beta=1.0,
+    gamma=0.001,
+    delta=0.0,
+    epsilon=0.001,
+    debug=False,
+):
+
+    # probably a better way to do this, but works for now
+    sumefficlosses = None
+    for i in range(len(net.effics)):
+        effic = net.effics[i]
+        efficnet = net.nets[i]
+        loss_i = loss_fn(
+            y_pred[i],
+            y_true,
+            features,
+            efficnet,
+            effic,
+            alpha,
+            beta,
+            gamma,
+            delta,
+            debug,
+        )
+        if sumefficlosses is None:
+            sumefficlosses = loss_i
+        else:
+            sumefficlosses = sumefficlosses + loss_i
+
+    loss = sumefficlosses
+
+    if len(net.effics) >= 3:
+        cuts=[net.nets[k].get_cuts() for k in range(len(net.effics))]
+        l=smooth_loss_fn(net.effics,cuts)
+        if loss.monotloss == 0:
+            loss.monotloss = l
+        else:
+            loss.monotloss = loss.monotloss + l
+
+        loss.monotloss = epsilon * loss.monotloss
+
+    return loss
     
 
 def full_loss_fn(y_pred, y_true, features, net,
                  alpha=1., beta=1., gamma=0.001, delta=0., 
                  eps_ef=0.001, eps_pt=0.001, eps_mu=0.001,
                  debug=False):
+
     loss=None    
     for i in range(len(net.pt)):
         for j in range(len(net.mu)):
-            for k in range(len(net.effics)):
-                pt     = net.pt[i][0]
-                mu     = net.mu[j][0]
-                effic  = net.effics[k]
-                subnet = net.nets[i][j][k]
-                l=loss_fn(y_pred[i][j][k], 
-                          y_true[i][j], 
-                          features, 
-                          subnet, effic,
-                          alpha, beta, gamma, delta, debug)
-                if loss==None:
-                    loss = photonlossvars(l)
-                    #print(type(loss))
-                else:
-                    loss = loss + l
-                    #print(type(loss))
+            l=effic_loss_fn_updated(y_pred[i][j], 
+                                    y_true[i][j], 
+                                    features, 
+                                    net.nets[i][j],
+                                    alpha, beta, gamma, delta, eps_ef, debug)
+            if loss==None:
+                loss = photonlossvars(l)
+            else:
+                loss = loss + l
 
-
-    # this broke everything!  don't do this scaling.  not sure why it doesn't work
-    #totalpoints=(len(net.pt)*len(net.mu)*len(net.effics))
-    #loss.efficloss /= totalpoints
-    #loss.backgloss /= totalpoints
-    #loss.cutszloss /= totalpoints
-
-    #print(type(loss))
-
-    # now smooth over efficiency, for each pT/mu bin:
-    if len(net.effics)>=3:
-        for i in range(len(net.pt)):
-            for j in range(len(net.mu)):
-                cuts=[net.nets[i][j][k].get_cuts() for k in range(len(net.effics))]
-                l=smooth_loss_fn(net.effics,cuts)
-                if loss.monotloss == 0:
-                    loss.monotloss = l
-                else:
-                    loss.monotloss = loss.monotloss + l
-        loss.monotloss = loss.monotloss*eps_ef/(len(net.pt)*len(net.mu))
-
+    # should scale down loss.monotloss in the same way as ptloss and muloss below?
+    
+    
     # now smooth over pT, for each efficiency/mu bin:
     if len(net.pt)>=3:
         for k in range(len(net.effics)):
@@ -175,134 +194,4 @@ def full_loss_fn(y_pred, y_true, features, net,
         loss.muloss = loss.muloss*eps_mu/(len(net.pt)*len(net.effics))
 
         
-    return loss
-    
-
-
-# scott's version, does this simultaneously in all dimensions. not sure I understand how this works.
-def scott_full_loss_fn(y_pred, y_true, features, net,
-                  alpha=1., beta=1., gamma=0.001, delta=0., epsilon=0.001,
-                  debug=False):
-    sumptlosses=None    
-    for i in range(len(net.pt)):
-        for j in range(len(net.mu)):
-            for k in range(len(net.effics)):
-                pt=net.pt[i][0]
-                mu=net.mu[j][0]
-                effic = net.effics[k]
-                subnet = net.nets[i][j][k]
-                l=loss_fn(y_pred[i][j][k], y_true[i][j], features, 
-                          subnet, effic,
-                          alpha, beta, gamma, delta, debug)
-                if sumptlosses==None:
-                    sumptlosses=l
-                else:
-                    sumptlosses = sumptlosses + l
-
-    loss=sumptlosses
-
-    
-
-    if len(net.pt)>=3 and len(net.mu)>=3:
-        featurelosspt = None
-        featurelossmu = None
-        featurelosseffic = None
-        for i in range(1,len(net.pt)-1):
-            for j in range(1,len(net.mu)-1):
-                for k in range(1,len(net.effics)-1):
-                    cuts_ijk   = net.nets[i  ][j  ][k  ].get_cuts()
-                    cuts_im1jk = net.nets[i-1][j  ][k  ].get_cuts()
-                    cuts_ip1jk = net.nets[i+1][j  ][k  ].get_cuts()
-                    cuts_ijm1k = net.nets[i  ][j-1][k  ].get_cuts()
-                    cuts_ijp1k = net.nets[i  ][j+1][k  ].get_cuts()
-                    cuts_ijkm1 = net.nets[i  ][j  ][k-1].get_cuts()
-                    cuts_ijkp1 = net.nets[i  ][j  ][k+1].get_cuts()
-                    flpt = None
-                    flmu = None
-                    fleffic = None
-        
-                    cutrange_pt           =  cuts_ip1jk-cuts_im1jk
-                    mean_pt               = (cuts_ip1jk+cuts_im1jk)/2.
-                    distance_from_mean_pt = (cuts_ijk  -mean_pt)
-                    
-                    cutrange_mu           =  cuts_ijp1k-cuts_ijm1k
-                    mean_mu               = (cuts_ijp1k+cuts_ijm1k)/2.
-                    distance_from_mean_mu = (cuts_ijk  -mean_mu)
-                    
-                    cutrange_effic           =  cuts_ijkp1-cuts_ijkm1
-                    mean_effic               = (cuts_ijkp1+cuts_ijkm1)/2.
-                    distance_from_mean_effic = (cuts_ijk  -mean_effic)                
-                    exponent=2.  
-                    
-                    flpt=(distance_from_mean_pt**exponent)/((cutrange_pt**exponent)+0.1) 
-                    flmu=(distance_from_mean_mu**exponent)/((cutrange_mu**exponent)+0.1) 
-                    fleffic = (distance_from_mean_effic**exponent)/((cutrange_effic**exponent)+0.1)
-                    # -----------------------------------------------------
-                  
-                    if featurelosspt == None:
-                        featurelosspt = flpt
-                    else:
-                        featurelosspt = featurelosspt + flpt
-                        
-                    if featurelossmu == None:
-                        featurelossmu = flmu
-                    else:
-                        featurelossmu = featurelossmu + flmu
-                    
-                    if featurelosseffic == None:
-                        featurelosseffic = fleffic
-                    else:
-                        featurelosseffic = featurelosseffic + fleffic
-                    
-        sumptlosses = torch.sum(featurelosspt)/features
-        summulosses = torch.sum(featurelossmu)/features
-        summonotlosses = torch.sum(featurelosseffic)/features #/(len(net.pt)-2)
-        loss.ptloss = epsilon*sumptlosses
-        loss.muloss = epsilon*summulosses
-        loss.monotloss = epsilon*summonotlosses
-
-    ### For pt>=3 and mu<3
-    if len(net.pt)>=3 and len(net.mu)<3:
-        featurelosspt = None
-        featurelosseffic = None
-        for i in range(1,len(net.pt)-1):
-            for j in range(len(net.mu)):
-                for k in range(1,len(net.effics)-1):
-                    cuts_ijk   = net.nets[i  ][j  ][k  ].get_cuts()
-                    cuts_im1jk = net.nets[i-1][j  ][k  ].get_cuts()
-                    cuts_ip1jk = net.nets[i+1][j  ][k  ].get_cuts()
-                    cuts_ijkm1 = net.nets[i  ][j  ][k-1].get_cuts()
-                    cuts_ijkp1 = net.nets[i  ][j  ][k+1].get_cuts()
-                    flpt = None
-                    flmu = None
-                    fleffic = None
-        
-                    cutrange_pt           =  cuts_ip1jk-cuts_im1jk
-                    mean_pt               = (cuts_ip1jk+cuts_im1jk)/2.
-                    distance_from_mean_pt = (cuts_ijk  -mean_pt)
-                    
-                    cutrange_effic           =  cuts_ijkp1-cuts_ijkm1
-                    mean_effic               = (cuts_ijkp1+cuts_ijkm1)/2.
-                    distance_from_mean_effic = (cuts_ijk  -mean_effic)                
-                    exponent=2.  
-                    
-                    flpt=(distance_from_mean_pt**exponent)/((cutrange_pt**exponent)+0.1)
-                    fleffic = (distance_from_mean_effic**exponent)/((cutrange_effic**exponent)+0.1)
-                    # -----------------------------------------------------
-                  
-                    if featurelosspt == None:
-                        featurelosspt = flpt
-                    else:
-                        featurelosspt = featurelosspt + flpt
-                    
-                    if featurelosseffic == None:
-                        featurelosseffic = fleffic
-                    else:
-                        featurelosseffic = featurelosseffic + fleffic
-                    
-        sumptlosses = torch.sum(featurelosspt)/features
-        summonotlosses = torch.sum(featurelosseffic)/features #/(len(net.pt)-2)
-        loss.ptloss = epsilon*sumptlosses
-        loss.monotloss = epsilon*summonotlosses
-
     return loss
