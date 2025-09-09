@@ -2,35 +2,53 @@ import torch
 
 from cabin.LossFunctions import lossvars,loss_fn,effic_loss_fn
 
+# this should go into CABIN
+def scale_lossvars(self,scale):
+    self.efficloss = scale * self.efficloss
+    self.backgloss = scale * self.backgloss
+    self.cutszloss = scale * self.cutszloss
+    self.monotloss = scale * self.monotloss
+    self.BCEloss   = scale * self.BCEloss
+
+def __copy__lossvars(self,other):
+    self.efficloss = other.efficloss
+    self.backgloss = other.backgloss
+    self.cutszloss = other.cutszloss
+    self.monotloss = other.monotloss
+    self.BCEloss   = other.BCEloss
+    self.signaleffic = other.signaleffic
+    self.backgreffic = other.backgreffic
+    
+
+lossvars.scale = scale_lossvars
+lossvars.__copy__ = __copy__lossvars
+
+# this is for photons only
 class photonlossvars(lossvars):
     def __init__(self,other=None):
         self.ptloss = 0
         self.muloss = 0
-        #print("hi")
         if other is not None:
-            #print("hi2")
             self.__copy__(other)
          
     def __copy__(self,other):
-        self.efficloss = other.efficloss
-        self.backgloss = other.backgloss
-        self.cutszloss = other.cutszloss
-        self.monotloss = other.monotloss
-        self.BCEloss   = other.BCEloss
-        self.signaleffic = other.signaleffic
-        self.backgreffic = other.backgreffic
+        super().__copy__(other)
+        
         if hasattr(other, 'ptloss'):
             self.ptloss = other.ptloss
 
         if hasattr(other, 'muloss'):
             self.muloss = other.muloss
-        #print("hi3")
         
     def totalloss(self):
         return super().totalloss()+self.ptloss+self.muloss
 
+    def scale(self,scale):
+        super().scale(scale)
+        self.ptloss = scale * self.ptloss
+        self.muloss = scale * self.muloss
+
     def __add__(self,other):
-        
         third = photonlossvars(super().__add__(other))
         
         if hasattr(other, 'ptloss'):
@@ -166,8 +184,8 @@ def full_loss_fn(y_pred, y_true, features, net,
             else:
                 loss = loss + l
 
-    # should scale down loss.monotloss in the same way as ptloss and muloss below?
-    
+    # something like this would make sense.  but it really screws things up.
+    # loss.scale(1./(len(net.pt)*len(net.mu)))
     
     # now smooth over pT, for each efficiency/mu bin:
     if len(net.pt)>=3:
