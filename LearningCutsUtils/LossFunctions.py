@@ -1,38 +1,17 @@
 import torch
 
-from cabin.LossFunctions import lossvars,loss_fn,effic_loss_fn
+from cabin.LossFunctions import lossvars,loss_fn,effic_loss_fn,smooth_loss_fn
 
-# this should go into CABIN
-def scale_lossvars(self,scale):
-    self.efficloss = scale * self.efficloss
-    self.backgloss = scale * self.backgloss
-    self.cutszloss = scale * self.cutszloss
-    self.monotloss = scale * self.monotloss
-    self.BCEloss   = scale * self.BCEloss
 
-def __copy__lossvars(self,other):
-    self.efficloss = other.efficloss
-    self.backgloss = other.backgloss
-    self.cutszloss = other.cutszloss
-    self.monotloss = other.monotloss
-    self.BCEloss   = other.BCEloss
-    self.signaleffic = other.signaleffic
-    self.backgreffic = other.backgreffic
-    
-
-lossvars.scale = scale_lossvars
-lossvars.__copy__ = __copy__lossvars
-
-# this is for photons only
 class photonlossvars(lossvars):
     def __init__(self,other=None):
         self.ptloss = 0
         self.muloss = 0
         if other is not None:
-            self.__copy__(other)
+            self.copy(other)
          
-    def __copy__(self,other):
-        super().__copy__(other)
+    def copy(self,other):
+        super().copy(other)
         
         if hasattr(other, 'ptloss'):
             self.ptloss = other.ptloss
@@ -64,106 +43,6 @@ class photonlossvars(lossvars):
         return third
         
 
-# This should really go into CABIN at some point.
-def smooth_loss_fn(xaxis,cuts):
-    loss = None
-
-    if len(xaxis)<3: 
-        return loss
-
-    for i in range(1,len(xaxis)-1):
-        # y is the cut, x is the dependent variable (e.g. efficiency, or pT, or mu)
-        y_i   = cuts [i  ]
-        y_im1 = cuts [i-1]
-        y_ip1 = cuts [i+1]
-        x_i   = xaxis[i  ]
-        x_im1 = xaxis[i-1]
-        x_ip1 = xaxis[i+1]
-
-        fl = None
-
-        # ------------------------------------------------------------------
-        # This method just forces cut i to be in between cut i+1 and cut i-1. 
-        #
-        # add some small term so that when cutrange=0 the loss doesn't become undefined
-        xrange               = (x_ip1 - x_im1)
-        yrange               = (y_ip1 - y_im1)
-
-        slope                = (yrange / xrange)
-        interp               = (slope*(x_i-x_im1) + y_im1)
-        distance_from_interp = (y_i   - interp)
-        
-        # add some offset to denominator to avoid case where cutrange=0.
-        # playing with the exponent doesn't change behavior much.
-        # it's important that this term not become too large, otherwise
-        # the training won't converge.  just a modest penalty for moving
-        # away from the linear interpolation should do the trick.
-        exponent=2.  # if this changes, e.g. to 4, then epsilon will also need to increase
-        fl=(distance_from_interp**exponent)/((yrange**exponent)+0.1)
-        # ------------------------------------------------------------------
-        
-        # ------------------------------------------------------------------
-        ## can also do it this way, which just forces all sequential cuts to be similar.
-        #fl = torch.pow(cuts_i-cuts_im1,2) + torch.pow(cuts_i-cuts_ip1,2) + torch.pow(cuts_im1-cuts_ip1,2)
-        # ------------------------------------------------------------------
-        if loss == None:
-            loss = fl
-        else:
-            loss = loss + fl
-
-    # sum over all cuts, and normalize to the number of xaxis points
-    return torch.sum(loss)/len(xaxis)
-
-    
-# this also needs to go into CABIN
-def effic_loss_fn_updated(
-    y_pred,
-    y_true,
-    features,
-    net,
-    alpha=1.0,
-    beta=1.0,
-    gamma=0.001,
-    delta=0.0,
-    epsilon=0.001,
-    debug=False,
-):
-
-    # probably a better way to do this, but works for now
-    sumefficlosses = None
-    for i in range(len(net.effics)):
-        effic = net.effics[i]
-        efficnet = net.nets[i]
-        loss_i = loss_fn(
-            y_pred[i],
-            y_true,
-            features,
-            efficnet,
-            effic,
-            alpha,
-            beta,
-            gamma,
-            delta,
-            debug,
-        )
-        if sumefficlosses is None:
-            sumefficlosses = loss_i
-        else:
-            sumefficlosses = sumefficlosses + loss_i
-
-    loss = sumefficlosses
-
-    if len(net.effics) >= 3:
-        cuts=[net.nets[k].get_cuts() for k in range(len(net.effics))]
-        l=smooth_loss_fn(net.effics,cuts)
-        if loss.monotloss == 0:
-            loss.monotloss = l
-        else:
-            loss.monotloss = loss.monotloss + l
-
-        loss.monotloss = epsilon * loss.monotloss
-
-    return loss
     
 
 def full_loss_fn(y_pred, y_true, features, net,
@@ -174,15 +53,15 @@ def full_loss_fn(y_pred, y_true, features, net,
     loss=None    
     for i in range(len(net.pt)):
         for j in range(len(net.mu)):
-            l=effic_loss_fn_updated(y_pred[i][j], 
-                                    y_true[i][j], 
-                                    features, 
-                                    net.nets[i][j],
-                                    alpha, beta, gamma, delta, eps_ef, debug)
+            efl=effic_loss_fn(y_pred[i][j], 
+                              y_true[i][j], 
+                              features, 
+                              net.nets[i][j],
+                              alpha, beta, gamma, delta, eps_ef, debug)
             if loss==None:
-                loss = photonlossvars(l)
+                loss = photonlossvars(efl)
             else:
-                loss = loss + l
+                loss = loss + efl
 
     # something like this would make sense.  but it really screws things up.
     # loss.scale(1./(len(net.pt)*len(net.mu)))
