@@ -1,6 +1,6 @@
 # Using the CABIN method for ATLAS photon identification
 
-Workspace for optimizing ATLAS photon ID cuts using the CABIN method.  The CABIN method is implemented in the [cabin python package](https://github.com/scipp-atlas/cabin), available [on pypi](https://pypi.org/project/cabin/).
+Workspace for optimizing ATLAS photon ID cuts using the CABIN method.  The CABIN method is implemented in the [cabin python package](https://github.com/scipp-atlas/cabin), available [on pypi](https://pypi.org/project/cabin/).  Requires running with `cabin v0.3.3` or newer.
 
 ## Previous work
 
